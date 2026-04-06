@@ -67,14 +67,14 @@ class CustomPIDController:
 
 
 # *** KULLANILACAK KONTROLCÜYÜ BURADAN SEÇİN ***
-my_controller = BangBangController()
-#my_controller = CustomPIDController(kp=5, ki=0.03, kd=0.8)
+#my_controller = BangBangController()
+my_controller = CustomPIDController(kp=8, ki=0.02, kd=1)
 
 # ==========================================================
 # 3. SİMÜLASYON AYARLARI (HARİTA VE FİZİK)
 # ==========================================================
 MAZE_GRID = MAZE_EXPERT       # Seçilen Harita: MAZE_MineOne, MAZE_MEDIUM_T vb.
-BASE_SPEED = 0.5              # Robotun Düz Yol Hızı (m/s)
+BASE_SPEED = 0.5             # Robotun Düz Yol Hızı (m/s)
 CELL_SIZE = 0.2               # Her Bir Labirent Karesinin Boyutu (Metre)
 SIM_DT = 0.05                  # Zaman Adımı
 ROBOT_SENSOR_COUNT = 8        # IR Sensör Sayısı
@@ -123,7 +123,7 @@ w.add(robot)
 robot.attach_to_world(w)
 
 # Sürücü
-executor = PathExecutor(robot, maze, my_controller, path, base_speed=BASE_SPEED, junction_threshold=0.15)
+executor = PathExecutor(robot, maze, my_controller, path, base_speed=BASE_SPEED, junction_threshold=0.05)
 
 # GUI ve Döngü
 w.render()
