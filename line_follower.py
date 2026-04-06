@@ -10,7 +10,7 @@ class LineFollowerRobot(RectangleEntity):
                  sensor_forward_offset: float = 0.075):
         size = Point(0.15, 0.08)
         movable = True
-        friction = 0.06
+        friction = 0.05
         super().__init__(center, heading, size, movable, friction)
 
         self.color = color

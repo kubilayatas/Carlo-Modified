@@ -151,81 +151,79 @@ class MazePlanner:
         return path
 
 class PathExecutor:
-    """Planlanan hücre yolunu gerçek zamanlı robot kontrolüne dönüştürür."""
+    """Planlanan tam yolu veya dinamik anlık hedefi gerçek zamanlı robot kontrolüne dönüştürür."""
 
     # Hücre geçiş yönleri → heading açısı (radyan)
     HEADING_MAP = {
         'up':    np.pi / 2,
-        'down':  3 * np.pi / 2,   # veya -np.pi/2
+        'down':  3 * np.pi / 2,
         'left':  np.pi,
         'right': 0.0
     }
 
-    def __init__(self, robot, maze_track, pid_controller, path: list,
+    def __init__(self, robot, maze_track, pid_controller, path=None,
                  base_speed: float = 3.0,
                  junction_threshold: float = 2.0,
-                 lost_line_timeout: int = 500):
-        """
-        robot: LineFollowerRobot referansı
-        maze_track: MazeTrack referansı
-        pid_controller: PIDController referansı
-        path: [(r,c), ...] planlanan hücre yolu
-        base_speed: Düz çizgi hızı (m/s)
-        junction_threshold: Kavşağa yakınlık eşiği (metre)
-        lost_line_timeout: Çizgi kaybında kaç tick bekle
-        """
+                 lost_line_timeout: int = 10):
         self.robot = robot
         self.maze = maze_track
         self.pid = pid_controller
-        self.path = path
+        self.path = path  # Liste ise Faz 2, None ise Faz 1
         self.current_path_index = 0
         self.base_speed = base_speed
         self.junction_threshold = junction_threshold
         self.lost_line_timeout = lost_line_timeout
         self._lost_counter = 0
         self.finished = False
+        
+        self.dynamic_target = None
+        self.reached_dynamic_target = False
 
-    def _get_direction(self, from_cell, to_cell):
-        """İki hücre arasındaki yönü belirle."""
-        dr = to_cell[0] - from_cell[0]
-        dc = to_cell[1] - from_cell[1]
-        if dr == -1: return 'up'
-        if dr == 1:  return 'down'
-        if dc == -1: return 'left'
-        if dc == 1:  return 'right'
-        return None
-
-    def _target_heading(self):
-        """Şu anki hedef heading açısını döndür."""
-        if self.current_path_index + 1 >= len(self.path):
-            return None
-        d = self._get_direction(self.path[self.current_path_index],
-                                self.path[self.current_path_index + 1])
-        return self.HEADING_MAP.get(d) if d else None
+    def set_dynamic_target(self, cell):
+        """Faz 1 (Keşif) için bir sonraki hedef hücreyi ayarla."""
+        self.dynamic_target = cell
+        self.reached_dynamic_target = False
+        self.finished = False
 
     def step(self, dt: float):
-        """Her simülasyon tick'inde çağrılır.
-        Robot kontrolünü ayarlar (set_control)."""
-        if self.finished or self.current_path_index >= len(self.path) - 1:
+        if self.finished:
             self.robot.set_control(0, -0.5)  # Dur
-            self.finished = True
             return
 
-        # Mevcut hedef hücre
-        target_cell = self.path[self.current_path_index + 1]
-        target_pos = self.maze.cell_to_world(*target_cell)
+        # Hedef hücreyi belirle
+        target_cell = None
+        if self.path is not None:
+            if self.current_path_index + 1 < len(self.path):
+                target_cell = self.path[self.current_path_index + 1]
+            else:
+                self.robot.set_control(0, -0.5)
+                self.finished = True
+                return
+        else:
+            if self.dynamic_target is None or self.reached_dynamic_target:
+                self.robot.set_control(0, -0.5)
+                return
+            target_cell = self.dynamic_target
 
-        # Hedefe olan mesafe
+        target_pos = self.maze.cell_to_world(*target_cell)
         dx = target_pos.x - self.robot.center.x
         dy = target_pos.y - self.robot.center.y
         dist = np.sqrt(dx**2 + dy**2)
 
-        # Hedef hücreye yeterince yaklaştıysa sonraki hücreye geç
         if dist < self.junction_threshold:
-            self.current_path_index += 1
-            if self.current_path_index >= len(self.path) - 1:
-                self.robot.set_control(0, -0.5)
-                self.finished = True
+            if self.path is not None:
+                self.current_path_index += 1
+                if self.current_path_index >= len(self.path) - 1:
+                    self.robot.set_control(0, -0.5)
+                    self.finished = True
+                    return
+                # Sonraki hedefe geçebilmesi için yeniden target belirlemeli
+                target_cell = self.path[self.current_path_index + 1]
+                target_pos = self.maze.cell_to_world(*target_cell)
+                dx = target_pos.x - self.robot.center.x
+                dy = target_pos.y - self.robot.center.y
+            else:
+                self.reached_dynamic_target = True
                 return
 
         # Sensör bazlı PID çizgi izleme
@@ -234,30 +232,118 @@ class PathExecutor:
         if line_error is not None:
             self._lost_counter = 0
             steering = self.pid.compute(line_error, dt)
-            # Dönüşlerde hız azalt
             speed_factor = 1.0 - 0.5 * abs(line_error)
             throttle_target = self.base_speed * speed_factor
             current_speed = self.robot.speed
             accel = (throttle_target - current_speed) * 0.5
             self.robot.set_control(steering, accel)
         else:
-            # Çizgi kayıp — son bilinen yöne doğru yavaşça ilerle
             self._lost_counter += 1
             if self._lost_counter > self.lost_line_timeout:
-                # Çok uzun süre kayıp — dur
                 self.robot.set_control(0, -0.3)
             else:
                 # Hedefe doğru heading düzelt
                 target_angle = np.arctan2(dy, dx)
                 heading_error = target_angle - self.robot.heading
-                # Normalize [-pi, pi]
                 heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
-                steering = np.clip(heading_error * 0.3, -0.5, 0.5)
-                self.robot.set_control(steering, 0.05)
+                steering = np.clip(heading_error * 1.5, -1.2, 1.2)
+                
+                # Çizgiden koptuğu anda (keskin virajda vs.) CARLO'daki bisiklet fiziği gereği 
+                # durursa yerinde dönemez, dönmesi için mutlaka ileri gitmeli!
+                throttle_target = self.base_speed * 0.6  # Çizgi dışındayken %60 hızla ilerle
+                accel = (throttle_target - self.robot.speed) * 0.5
+                self.robot.set_control(steering, accel)
 
     @property
     def progress(self):
-        """Yüzde ilerleme."""
-        if len(self.path) <= 1:
-            return 100.0
+        if self.path is None: return 0.0
+        if len(self.path) <= 1: return 100.0
         return 100.0 * self.current_path_index / (len(self.path) - 1)
+
+class DynamicExplorer:
+    """Faz 1: Robotun labirenti adım adım keşfederek kendi iç haritasını oluşturduğu sınıf."""
+    def __init__(self, maze_track, start_cell, initial_heading_str='up'):
+        self.maze = maze_track
+        self.internal_graph = {}  # { (r,c): [ (nr,nc), ... ] }
+        self.current_cell = start_cell
+        self.heading_str = initial_heading_str
+        self.visited = []
+
+    def _get_direction_offset(self, direction):
+        if direction == 'up': return (-1, 0)
+        if direction == 'down': return (1, 0)
+        if direction == 'left': return (0, -1)
+        if direction == 'right': return (0, 1)
+
+    def _get_left(self, d):
+        return {'up':'left', 'left':'down', 'down':'right', 'right':'up'}[d]
+
+    def _get_right(self, d):
+        return {'up':'right', 'right':'down', 'down':'left', 'left':'up'}[d]
+
+    def _get_back(self, d):
+        return {'up':'down', 'down':'up', 'left':'right', 'right':'left'}[d]
+
+    def discover_and_decide_next(self, current_cell):
+        """Bu hücredeki topolojiyi alır, haritayı günceller ve Solu-İzle'ye göre sıradaki hücreyi seçer."""
+        self.current_cell = current_cell
+        self.visited.append(current_cell)
+
+        # 1. Hücre topolojisini simülasyon motorundan (sensör niyetine) çek
+        topology = self.maze.get_topology_at(*current_cell)
+        if current_cell not in self.internal_graph:
+            self.internal_graph[current_cell] = []
+
+        neighbors = []
+        for d in ['up', 'down', 'left', 'right']:
+            if topology and topology.get(d, False):
+                dr, dc = self._get_direction_offset(d)
+                neighbors.append((current_cell[0] + dr, current_cell[1] + dc))
+        
+        self.internal_graph[current_cell] = neighbors
+
+        # 2. Karar ver (Left-Hand Rule)
+        candidates = [
+            self._get_left(self.heading_str),
+            self.heading_str,
+            self._get_right(self.heading_str),
+            self._get_back(self.heading_str)
+        ]
+
+        next_cell = None
+        for try_dir in candidates:
+            dr, dc = self._get_direction_offset(try_dir)
+            target = (current_cell[0] + dr, current_cell[1] + dc)
+            # Eğrisiyle doğrusuyla bu hedef komşular arasında açık (yol) mu?
+            if target in neighbors:
+                next_cell = target
+                self.heading_str = try_dir
+                break
+
+        return next_cell
+
+    def get_shortest_path_to_target(self, end_cell):
+        """Keşfedilen internal_graph üzerinden BFS ile en kısa rotayı çıkarır."""
+        from collections import deque
+        queue = deque()
+        start = self.visited[0]
+        queue.append(start)
+        visited = {start: None}
+
+        while queue:
+            curr = queue.popleft()
+            if curr == end_cell:
+                path = []
+                node = end_cell
+                while node is not None:
+                    path.append(node)
+                    node = visited[node]
+                return path[::-1]
+
+            for neighbor in self.internal_graph.get(curr, []):
+                if neighbor not in visited:
+                    visited[neighbor] = curr
+                    queue.append(neighbor)
+        
+        return []
+

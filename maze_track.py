@@ -3,7 +3,7 @@ from agents import Painting
 from geometry import Point
 
 class MazeTrack:
-    def __init__(self, grid, cell_size: float = 0.3, line_width: float = 0.02,
+    def __init__(self, grid, cell_size: float = 0.3, line_width: float = 0.03,
                  line_color: str = 'black', origin_x: float = None, origin_y: float = None):
         """
         grid: 2D liste veya numpy array. 0=boş, 1=yol, 2=başlangıç, 3=bitiş.
