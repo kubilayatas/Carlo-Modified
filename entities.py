@@ -158,6 +158,99 @@ class RectangleEntity(Entity):
         C = self.corners
         self.obj = Rectangle(*C[:-1])
         
+class DiffDriveEntity(RectangleEntity):
+    """2WD Diferansiyel Sürüş kinematik modeli.
+    
+    set_control(v_left, v_right) ile sol ve sağ tekerlek hızları verilir.
+    tick(dt) içinde ICC (Instantaneous Center of Curvature) tabanlı
+    pozisyon ve heading güncellemesi yapılır.
+    """
+
+    def __init__(self, center: Point, heading: float, size: Point,
+                 movable: bool = True, friction: float = 0):
+        super().__init__(center, heading, size, movable, friction)
+        if movable:
+            self.v_L = 0.0  # Sol tekerlek hızı (m/s)
+            self.v_R = 0.0  # Sağ tekerlek hızı (m/s)
+
+    @property
+    def track_width(self) -> float:
+        """Tekerlekler arası mesafe (size.y = robotun genişliği)."""
+        return self.size.y
+
+    def set_control(self, v_left: float, v_right: float):
+        """Sol ve sağ tekerlek hızlarını ayarla.
+        
+        Args:
+            v_left: Sol tekerlek hızı (m/s)
+            v_right: Sağ tekerlek hızı (m/s)
+        """
+        self.v_L = v_left
+        self.v_R = v_right
+
+    def tick(self, dt: float):
+        if not self.movable:
+            return
+
+        # Friction uygula (her tekerleğe ayrı ayrı sönümleme)
+        v_L = self.v_L
+        v_R = self.v_R
+        if self.friction > 0:
+            v_L = v_L - np.sign(v_L) * self.friction * dt
+            v_R = v_R - np.sign(v_R) * self.friction * dt
+            # Friction hızı sıfırın ötesine taşımasın
+            if np.sign(v_L) != np.sign(self.v_L) and self.v_L != 0:
+                v_L = 0.0
+            if np.sign(v_R) != np.sign(self.v_R) and self.v_R != 0:
+                v_R = 0.0
+
+        # Tekerlek hızlarını sınırla
+        v_L = np.clip(v_L, -self.max_speed, self.max_speed)
+        v_R = np.clip(v_R, -self.max_speed, self.max_speed)
+
+        L = self.track_width
+        EPS = 1e-8
+
+        # Doğrusal ve açısal hız
+        v = (v_R + v_L) / 2.0
+        omega = (v_R - v_L) / L if L > EPS else 0.0
+
+        x = self.center.x
+        y = self.center.y
+        theta = self.heading
+
+        if abs(v_R - v_L) < EPS:
+            # Durum 1: Düz çizgi hareketi (v_L ≈ v_R)
+            x_new = x + v * np.cos(theta) * dt
+            y_new = y + v * np.sin(theta) * dt
+            theta_new = theta
+        elif abs(v_R + v_L) < EPS:
+            # Durum 2: Yerinde dönüş (v_L ≈ -v_R) — pure rotation
+            x_new = x
+            y_new = y
+            theta_new = theta + omega * dt
+        else:
+            # Durum 3: Genel ICC tabanlı ark hareketi
+            R = (L / 2.0) * (v_L + v_R) / (v_R - v_L)
+            icc_x = x - R * np.sin(theta)
+            icc_y = y + R * np.cos(theta)
+            dtheta = omega * dt
+            cos_dt = np.cos(dtheta)
+            sin_dt = np.sin(dtheta)
+            x_new = cos_dt * (x - icc_x) - sin_dt * (y - icc_y) + icc_x
+            y_new = sin_dt * (x - icc_x) + cos_dt * (y - icc_y) + icc_y
+            theta_new = theta + dtheta
+
+        # State güncelle
+        self.center = Point(x_new, y_new)
+        self.heading = np.mod(theta_new, 2 * np.pi)
+        self.velocity = Point(v * np.cos(theta_new), v * np.sin(theta_new))
+        self.acceleration = 0
+        self.angular_velocity = omega
+
+        self.buildGeometry()
+
+
 class CircleEntity(Entity):
     def __init__(self, center: Point, heading: float, radius: float, movable: bool = True, friction: float = 0):
         super(CircleEntity, self).__init__(center, heading, movable, friction)

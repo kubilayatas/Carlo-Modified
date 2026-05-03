@@ -6,7 +6,7 @@
 
 class PIDController:
     def __init__(self, kp: float = 0.5, ki: float = 0.0, kd: float = 0.1,
-                 output_min: float = -0.5, output_max: float = 0.5):
+                 output_min: float = -5.0, output_max: float = 5.0):
         self.kp = kp
         self.ki = ki
         self.kd = kd

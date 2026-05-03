@@ -13,32 +13,37 @@ from agents import Painting
 from geometry import Point
 from line_follower import LineFollowerRobot
 from maze_track import MazeTrack
-from maze_solver import MazePlanner, PathExecutor, DynamicExplorer
-from maze_presets import MAZE_MEDIUM_T, MAZE_EXPERT, MAZE_MineOne, MAZE_SIMPLE_S, MAZE_HARD_DEADENDS
+from maze_solver import PathExecutor
+from exploration_strategies import create_strategy
+from maze_presets import MAZE_MEDIUM_T, MAZE_EXPERT, MAZE_MineOne, MAZE_SIMPLE_S, MAZE_HARD_DEADENDS, MAZE_30x30
 
 # ==========================================================
-# 1. YOL BULMA HESAPLAYICISI (PATH PLANNING ALGORITHM)
+# 1. KEŞİF ALGORİTMASI SEÇİMİ (EXPLORATION STRATEGY)
 # ==========================================================
-# (ESKİ) def custom_path_planner(maze, start_cell, end_cell):
-# ... Bu kısım kullanıcının talebi üzerine Faz 1 (dinamik keşif) mantığıyla değiştirildiği için 
-# statik planlayıcı iptal edilmiştir. Robot yolu önceden bilmeyecektir.
+# Kullanılabilir stratejiler:
+#   'left_wall'    → Sol Duvar Takibi (bitiş noktasını bulunca durur)
+#   'right_wall'   → Sağ Duvar Takibi (bitiş noktasını bulunca durur)
+#   'full_explore' → Tüm Haritayı Keşfet + En Kısa Yol (BFS)
+
+EXPLORATION_STRATEGY = 'full_explore'
 
 # ==========================================================
 # 2. ÇİZGİ İZLEME KONTROLCÜLERİ (STEERING CONTROLLERS)
 # ==========================================================
 class BangBangController:
-    """ Basit "Eğer soldaysa Sağa Dön, Sağdaysa Sola Dön" kontrolcüsü. """
+    """ Basit "Eğer soldaysa Sağa Dön, Sağdaysa Sola Dön" kontrolcüsü.
+    Çıktı artık açısal hız (omega, rad/s) olarak yorumlanıyor. """
     def compute(self, line_error, dt):
         # line_error değeri -1.0 (en sol) ile +1.0 (en sağ) arasında gelir.
         if line_error < -0.1:
-            return -1.0  # Tam Sola kır
+            return -3.0  # Tam Sola dön (ω = -3 rad/s)
         elif line_error > 0.1:
-            return 1.0   # Tam Sağa kır
+            return 3.0   # Tam Sağa dön (ω = +3 rad/s)
         else:
             return 0.0   # Düz git
 
 class CustomPIDController:
-    """ Standart PID Algaritması (maze_solver içindekiyle aynı arayüz) """
+    """ Standart PID Algoritması (maze_solver içindekiyle aynı arayüz) """
     def __init__(self, kp=15, ki=0.01, kd=2):
         self.kp = kp
         self.ki = ki
@@ -51,32 +56,31 @@ class CustomPIDController:
         derivative = (error - self._prev_error) / dt if dt > 0 else 0.0
         output = self.kp * error + self.ki * self._integral + self.kd * derivative
         self._prev_error = error
-        return max(-1.2, min(1.2, output)) # Limit kontrolü (-1.2, +1.2) aralığı (Çok keskin dönüş)
+        return max(-5.0, min(5.0, output)) # Limit kontrolü — omega (rad/s) olarak geniş aralık
 
 
 # *** KULLANILACAK KONTROLCÜYÜ BURADAN SEÇİN ***
-my_controller = BangBangController()
-# Not: kp=2115 çok yüksek bir değerdir ve sistemi Bang-Bang kontrolcüye çevirir (-1 ile +1 arası salınım).
-# Yumuşak bir izleme için değerleri düşürdük:
-#my_controller = CustomPIDController(kp=2.0, ki=0.001, kd=0.2)
+#my_controller = BangBangController()
+my_controller = CustomPIDController(kp=2.0, ki=0.001, kd=0.2)
 
 # ==========================================================
 # 3. SİMÜLASYON AYARLARI (HARİTA VE FİZİK)
 # ==========================================================
-MAZE_GRID = MAZE_EXPERT       # Seçilen Harita: MAZE_MineOne, MAZE_MEDIUM_T vb.
-BASE_SPEED = 0.4              # Robotun Düz Yol Hızı (m/s)
-CELL_SIZE = 0.2               # Her Bir Labirent Karesinin Boyutu (Metre)
+MAZE_GRID = MAZE_30x30       # Seçilen Harita: MAZE_MineOne, MAZE_MEDIUM_T vb.
+BASE_SPEED = 0.15             # Robotun Düz Yol Hızı (m/s) — L virajlarda çizgiyi kaçırmaması için düşük
+CELL_SIZE = 0.1               # Her Bir Labirent Karesinin Boyutu (Metre)
 SIM_DT = 0.05                 # Zaman Adımı
 
 # Robot ve Sensör Ayarları
 ROBOT_SENSOR_COUNT = 8        # IR Sensör Sayısı
 SENSOR_SPREAD = 0.056         # Sensör dizilimi genişliği (Metre, çok açıksa çizgiyi görmeyebilir)
-SENSOR_OFFSET = 0.08         # Sensörlerin robot merkezinden ne kadar önde olduğu (Metre)
+SENSOR_OFFSET = 0.08          # Sensörlerin robot merkezinden ne kadar önde olduğu (Metre)
 
 # Çizgi ve Navigasyon Ayarları
-LINE_WIDTH = 0.03             # Yerdeki çizginin kalınlığı (Metre)
+LINE_WIDTH = 0.02             # Yerdeki çizginin kalınlığı (Metre)
 JUNCTION_THRESHOLD = 0.05     # Kavşak merkezine varış kabul edilme hassasiyeti (Metre)
-LOST_LINE_TIMEOUT = 500        # Çizgi kaybedildiğinde kaç adım boyunca hedefe yönelmeye çalışacak
+LOST_LINE_TIMEOUT = 500       # Çizgi kaybedildiğinde kaç adım boyunca hedefe yönelmeye çalışacak
+JUNCTION_PAUSE_TICKS = 0     # Kavşağa varınca kaç tick bekleyecek (dur-düşün-git)
 
 
 
@@ -100,8 +104,6 @@ maze.add_to_world(w)
 start_pos, start_cell = maze.get_start_position()
 end_pos, end_cell = maze.get_end_position()
 
-# 1) DİNAMİK KEŞİF BAŞLATICISI (FAZ 1 BAŞLANGICI)
-
 # Başlangıç konumundan çıkan ilk açık yolu otomatik algıla:
 start_topology = maze.get_topology_at(*start_cell)
 initial_heading_str = 'up'
@@ -114,7 +116,8 @@ if start_topology:
             initial_heading = angle
             break
 
-explorer = DynamicExplorer(maze_track=maze, start_cell=start_cell, initial_heading_str=initial_heading_str)
+# ── Keşif stratejisini oluştur ──
+strategy = create_strategy(EXPLORATION_STRATEGY, maze, start_cell, end_cell, initial_heading_str)
 
 # Robotu dünyaya ekle
 robot = LineFollowerRobot(start_pos, heading=initial_heading, sensor_count=ROBOT_SENSOR_COUNT,
@@ -124,59 +127,84 @@ w.add(robot)
 robot.attach_to_world(w)
 
 # Sürücü (Faz 1 için path önceden verilmez)
-executor = PathExecutor(robot, maze, my_controller, path=None, base_speed=BASE_SPEED, 
-                        junction_threshold=JUNCTION_THRESHOLD, lost_line_timeout=LOST_LINE_TIMEOUT)
+executor = PathExecutor(robot, maze, my_controller, path=None, base_speed=BASE_SPEED,
+                        junction_threshold=JUNCTION_THRESHOLD, lost_line_timeout=LOST_LINE_TIMEOUT,
+                        junction_pause_ticks=JUNCTION_PAUSE_TICKS)
 
-# İlk dinamik hücre hedefi robotun kendi hücresinin topolojisinden seçilir:
-next_cell = explorer.discover_and_decide_next(start_cell)
+# İlk dinamik hücre hedefini stratejiden al:
+next_cell = strategy.decide_next(start_cell)
 if next_cell:
     executor.set_dynamic_target(next_cell)
 
 # GUI ve Döngü
 w.render()
-max_ticks = 5000
+max_ticks = 10000  # Tam keşif daha uzun sürebilir
 phase_1_done = False
 
-print(">>> FAZ 1 (KEŞİF) BAŞLADI <<<")
+print(f">>> FAZ 1 ({strategy.name.upper()}) BAŞLADI <<<")
 for k in range(max_ticks):
     if not phase_1_done:
         # Faz 1: Keşif adımı
         executor.step(SIM_DT)
-        
-        # Robot dinamik hedefe vardıysa
+
+        # Kavşakta bekliyorsa logla
+        if executor.is_paused and executor.paused_at is not None:
+            if executor._pause_counter == executor.junction_pause_ticks - 1:
+                cell = executor.paused_at
+                # Çıkmaz sokak tespiti: sadece 1 komşusu olan hücre
+                neighbors = strategy.internal_graph.get(cell, [])
+                if len(neighbors) == 1:
+                    print(f"  [{k}] ✗ ÇIKMAZ SOKAK {cell}! Geri dönüyorum...")
+                else:
+                    print(f"  [{k}] Kavşak {cell}'a vardım, düşünüyorum...")
+
+        # Robot dinamik hedefe vardıysa (bekleme bittikten sonra tetiklenir)
         if executor.reached_dynamic_target:
             current = executor.dynamic_target
-            if current == end_cell:
-                print(f"[{k}] HEDEF BULUNDU! Keşif haritası çıkarıldı.")
+
+            # Bitiş noktası bulunduğunda logla
+            if current == end_cell and not strategy.found_end:
+                strategy.found_end = True
+                print(f"  [{k}] ★ Bitiş noktası ({end_cell}) bulundu!")
+                if strategy.is_phase1_done:
+                    print(f"       Strateji gereği keşif burada bitiyor.")
+
+            # Stratejiden bir sonraki hedefi al
+            nxt = strategy.decide_next(current)
+            if nxt is None or strategy.is_phase1_done:
+                # Keşif tamamlandı!
+                print(f"\n[{k}] ═══ KEŞİF TAMAMLANDI ({strategy.name}) ═══")
+                print(f"  Keşfedilen hücre sayısı: {strategy.explored_count}")
+                print(f"  Bitiş noktası {'bulundu ✓' if strategy.found_end else 'BULUNAMADI ✗'}")
                 phase_1_done = True
-                
-                # Ulaşıldığında iç haritadan BFS ile kısayolu hesapla
-                shortest_path = explorer.get_shortest_path_to_target(end_cell)
-                print(f"Faz 2 (Speed Run) rotası: {shortest_path}")
-                
+
+                if not strategy.found_end:
+                    print("Hata: Bitiş noktasına erişilemedi!")
+                    break
+
+                # Keşfedilen harita üzerinden en kısa yolu hesapla
+                shortest_path = strategy.get_phase2_path()
+                print(f"  Optimal rota ({len(shortest_path)} adım): {shortest_path}")
+
                 if len(shortest_path) < 2:
                     print("Hata: Hedefe gidebilecek tutarlı bir yol haritası çıkartılamadı.")
                     break
-                
+
                 # --- FAZ 2'YE HAZIRLIK: ROBOTU BAŞA IŞINLA ---
-                print(">>> FAZ 2 (HIZLI ÇÖZÜM) BAŞLIYOR <<<")
-                robot.center = Point(start_pos.x, start_pos.y) # Point nesnesini klonla
+                print("\n>>> FAZ 2 (HIZLI ÇÖZÜM) BAŞLIYOR <<<")
+                robot.center = Point(start_pos.x, start_pos.y)
                 robot.heading = initial_heading
                 robot.velocity = Point(0, 0)
-                
+
                 # Faz 2: Hızlı Executor, yolu biliyor
-                fast_speed = BASE_SPEED * 1.4 # %40 daha hızlı
-                executor = PathExecutor(robot, maze, my_controller, path=shortest_path, 
-                                        base_speed=fast_speed, 
-                                        junction_threshold=JUNCTION_THRESHOLD, 
-                                        lost_line_timeout=LOST_LINE_TIMEOUT)
+                fast_speed = BASE_SPEED * 1.4
+                executor = PathExecutor(robot, maze, my_controller, path=shortest_path,
+                                        base_speed=fast_speed,
+                                        junction_threshold=JUNCTION_THRESHOLD,
+                                        lost_line_timeout=LOST_LINE_TIMEOUT,
+                                        junction_pause_ticks=JUNCTION_PAUSE_TICKS)
             else:
-                # Duraksamadan direkt karar ver ve yola devam et
-                nxt = explorer.discover_and_decide_next(current)
-                if nxt is None:
-                    print(f"[{k}] Tıkandım, gidilecek yer yok! Başarısız.")
-                    break
-                
+                print(f"  [{k}] Karar: {current} → {nxt}  (keşfedilen: {strategy.explored_count})")
                 executor.set_dynamic_target(nxt)
     else:
         # Faz 2: Speed Run adımı
@@ -189,9 +217,6 @@ for k in range(max_ticks):
     w.tick()
     w.render()
     time.sleep(SIM_DT / 4)
-
-    # if k % 50 == 0:
-    #     print(f"Adım {k} | Mode: {'Keşif' if not phase_1_done else 'SpeedRun'} | Hız: {robot.speed:.2f}")
 
     if w.collision_exists(robot):
         print("Çarpışma Algılandı, Simülasyon Durduruluyor!")

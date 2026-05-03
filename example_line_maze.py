@@ -60,8 +60,9 @@ robot.attach_to_world(w)
 # path = planner.left_wall_follower(start_cell, end_cell, initial_direction='up')
 
 # ---- PID + Executor ----
-pid = PIDController(kp=15, ki=0.01, kd=2, output_min=-1.0, output_max=1.0)
-executor = PathExecutor(robot, maze, pid, path, base_speed=0.4, junction_threshold=0.15)
+pid = PIDController(kp=10.0, ki=0.01, kd=1.5, output_min=-5.0, output_max=5.0)
+executor = PathExecutor(robot, maze, pid, path, base_speed=0.4, junction_threshold=0.15,
+                        junction_pause_ticks=15)
 
 # ---- Simülasyon döngüsü ----
 w.render()

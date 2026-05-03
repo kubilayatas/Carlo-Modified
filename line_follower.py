@@ -1,8 +1,8 @@
-from entities import RectangleEntity
+from entities import DiffDriveEntity
 from geometry import Point
 import numpy as np
 
-class LineFollowerRobot(RectangleEntity):
+class LineFollowerRobot(DiffDriveEntity):
     def __init__(self, center: Point, heading: float,
                  color: str = 'green3',
                  sensor_count: int = 8,
