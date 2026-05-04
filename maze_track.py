@@ -36,6 +36,15 @@ class MazeTrack:
         wy = self.origin_y + (self.rows - 1 - r) * self.cell_size + self.cell_size / 2.0
         return Point(wx, wy)
 
+    def world_to_cell(self, x: float, y: float) -> tuple:
+        """Dünya koordinatı → en yakın grid hücresi (r, c).
+        Sensör modunda robotun hangi hücrede olduğunu bulmak için kullanılır."""
+        c = round((x - self.origin_x - self.cell_size / 2.0) / self.cell_size)
+        r = self.rows - 1 - round((y - self.origin_y - self.cell_size / 2.0) / self.cell_size)
+        r = max(0, min(self.rows - 1, r))
+        c = max(0, min(self.cols - 1, c))
+        return (r, c)
+
     def get_start_position(self):
         """Grid'de 2 ile işaretlenmiş hücrenin dünya koordinatını döndür."""
         for r in range(self.rows):

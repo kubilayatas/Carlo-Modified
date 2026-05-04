@@ -15,7 +15,7 @@ from line_follower import LineFollowerRobot
 from maze_track import MazeTrack
 from maze_solver import PathExecutor
 from exploration_strategies import create_strategy
-from maze_presets import MAZE_MEDIUM_T, MAZE_EXPERT, MAZE_MineOne, MAZE_SIMPLE_S, MAZE_HARD_DEADENDS, MAZE_30x30
+from maze_presets import MAZE_MEDIUM_T, MAZE_EXPERT, MAZE_MineOne, MAZE_SIMPLE_S, MAZE_HARD_DEADENDS, MAZE_30x30, MAZE_CITY, MAZE_TRAP, MAZE_OPEN
 
 # ==========================================================
 # 1. KEŞİF ALGORİTMASI SEÇİMİ (EXPLORATION STRATEGY)
@@ -66,10 +66,11 @@ my_controller = CustomPIDController(kp=2.0, ki=0.001, kd=0.2)
 # ==========================================================
 # 3. SİMÜLASYON AYARLARI (HARİTA VE FİZİK)
 # ==========================================================
-MAZE_GRID = MAZE_30x30       # Seçilen Harita: MAZE_MineOne, MAZE_MEDIUM_T vb.
+MAZE_GRID = MAZE_OPEN        # Seçilen Harita: MAZE_MineOne, MAZE_MEDIUM_T vb.
 BASE_SPEED = 0.15             # Robotun Düz Yol Hızı (m/s) — L virajlarda çizgiyi kaçırmaması için düşük
 CELL_SIZE = 0.1               # Her Bir Labirent Karesinin Boyutu (Metre)
 SIM_DT = 0.05                 # Zaman Adımı
+SPEED_RUN_SCALER = 2
 
 # Robot ve Sensör Ayarları
 ROBOT_SENSOR_COUNT = 8        # IR Sensör Sayısı
@@ -197,7 +198,7 @@ for k in range(max_ticks):
                 robot.velocity = Point(0, 0)
 
                 # Faz 2: Hızlı Executor, yolu biliyor
-                fast_speed = BASE_SPEED * 1.4
+                fast_speed = BASE_SPEED * SPEED_RUN_SCALER
                 executor = PathExecutor(robot, maze, my_controller, path=shortest_path,
                                         base_speed=fast_speed,
                                         junction_threshold=JUNCTION_THRESHOLD,

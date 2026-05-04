@@ -151,7 +151,12 @@ class MazePlanner:
         return path
 
 class PathExecutor:
-    """Planlanan tam yolu veya dinamik anlık hedefi gerçek zamanlı robot kontrolüne dönüştürür."""
+    """Planlanan tam yolu veya dinamik anlık hedefi gerçek zamanlı robot kontrolüne dönüştürür.
+
+    junction_mode:
+        'distance' — Öklid uzaklığı ile kavşak tespiti (varsayılan, eski davranış)
+        'sensor'   — IR sensör pattern'i ile kavşak tespiti (dijital ikiz modu)
+    """
 
     # Hücre geçiş yönleri → heading açısı (radyan)
     HEADING_MAP = {
@@ -167,7 +172,9 @@ class PathExecutor:
                  lost_line_timeout: int = 10,
                  junction_pause_ticks: int = 15,
                  turn_in_place_threshold: float = None,
-                 turn_speed: float = 0.08):
+                 turn_speed: float = 0.08,
+                 junction_mode: str = 'distance',
+                 probe_ticks: int = 6):
         self.robot = robot
         self.maze = maze_track
         self.pid = pid_controller
@@ -188,25 +195,34 @@ class PathExecutor:
         self._paused_at_cell = None
 
         # ── 2WD Yerinde Dönüş (Pivot Turn) ayarları ──
-        # turn_in_place_threshold: Bu açıdan (rad) büyük heading farkında
-        # robot yerinde döner. Varsayılan π/4 = 45°
         self.turn_in_place_threshold = turn_in_place_threshold if turn_in_place_threshold is not None else np.pi / 4
-        # turn_speed: Yerinde dönüş sırasında tekerlek hızı (m/s)
         self.turn_speed = turn_speed
-        # Heading toleransı: pivot dönüş bu kadar yakınlaşınca biter (~8°)
         self.turn_complete_tolerance = 0.15
-        # Dönüş durumu (loglama için)
         self._is_turning = False
+
+        # ── Kavşak algılama modu ──
+        self.junction_mode = junction_mode   # 'distance' veya 'sensor'
+        self.probe_ticks = probe_ticks       # Sensör modu: ileri sondaj süresi
+        self._sensor_state = 'driving'       # Sensör modu state machine
+        self._probe_counter = 0
+        self._forward_open = False           # İleri sondaj sonucu
+        self._detected_cell = None           # Sensörle tespit edilen hücre
+        self.junction_info = ''              # Son kavşak tipi bilgisi (log)
 
     def set_dynamic_target(self, cell):
         """Faz 1 (Keşif) için bir sonraki hedef hücreyi ayarla."""
         self.dynamic_target = cell
         self.reached_dynamic_target = False
         self.finished = False
+        if self.junction_mode == 'sensor':
+            self._sensor_state = 'driving'
+            self._lost_counter = 0
 
     @property
     def is_paused(self):
         """Kavşakta bekleme durumunda mı?"""
+        if self.junction_mode == 'sensor':
+            return self._sensor_state == 'paused' and self._pause_counter > 0
         return self._pause_counter > 0
 
     @property
@@ -219,42 +235,49 @@ class PathExecutor:
         """Hangi hücrede bekliyor (None ise beklemiyor)."""
         return self._paused_at_cell if self.is_paused else None
 
+    @property
+    def detected_cell(self):
+        """Sensör moduyla tespit edilen son kavşak hücresi."""
+        return self._detected_cell
+
     def step(self, dt: float):
         if self.finished:
-            self.robot.set_control(0, 0)  # Dur
+            self.robot.set_control(0, 0)
             return
+
+        if self.junction_mode == 'sensor':
+            self._step_sensor_mode(dt)
+        else:
+            self._step_distance_mode(dt)
+
+    # ══════════════════════════════════════════════════════════
+    # MOD 1: ÖKLID UZAKLIĞI İLE KAVŞAK TESPİTİ (distance)
+    # ══════════════════════════════════════════════════════════
+
+    def _step_distance_mode(self, dt: float):
+        """Orijinal mesafe tabanlı kavşak tespiti."""
 
         # ── Kavşakta bekleme durumu ──
         if self._pause_counter > 0:
-            self.robot.set_control(0, 0)  # Yerinde dur
+            self.robot.set_control(0, 0)
             self._pause_counter -= 1
             if self._pause_counter == 0:
-                # Bekleme bitti → kavşak kararını uygula
                 self._paused_at_cell = None
                 if self.path is not None:
-                    # Faz 2: Bir sonraki hücreye geç
                     self.current_path_index += 1
                     if self.current_path_index >= len(self.path) - 1:
                         self.finished = True
                 else:
-                    # Faz 1: Hedefe vardığını bildir
                     self.reached_dynamic_target = True
             return
 
         # Hedef hücreyi belirle
-        target_cell = None
-        if self.path is not None:
-            if self.current_path_index + 1 < len(self.path):
-                target_cell = self.path[self.current_path_index + 1]
-            else:
-                self.robot.set_control(0, 0)
+        target_cell = self._get_target_cell()
+        if target_cell is None:
+            self.robot.set_control(0, 0)
+            if self.path is not None:
                 self.finished = True
-                return
-        else:
-            if self.dynamic_target is None or self.reached_dynamic_target:
-                self.robot.set_control(0, 0)
-                return
-            target_cell = self.dynamic_target
+            return
 
         target_pos = self.maze.cell_to_world(*target_cell)
         dx = target_pos.x - self.robot.center.x
@@ -270,7 +293,6 @@ class PathExecutor:
                 self._pause_counter = self.junction_pause_ticks
                 return
             else:
-                # Bekleme süresi 0 ise anında geç (eski davranış)
                 self._paused_at_cell = None
                 if self.path is not None:
                     self.current_path_index += 1
@@ -285,34 +307,169 @@ class PathExecutor:
                     self.reached_dynamic_target = True
                     return
 
-        # ── 2WD Yerinde Dönüş (Pivot Turn) ──
-        # Hedefe doğru heading farkı büyükse, ileri gitmeden önce yerinde dön.
-        # Bu diferansiyel sürüşün en büyük avantajı: yerinde dönebilmek!
+        # ── 2WD Pivot Turn ──
         target_angle = np.arctan2(dy, dx)
         heading_error = target_angle - self.robot.heading
         heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
 
         if abs(heading_error) > self.turn_in_place_threshold:
-            # Yerinde pivot dönüşü: tekerlekler zıt yönde döner
             self._is_turning = True
             ts = self.turn_speed
             if heading_error > 0:
-                self.robot.set_control(-ts, ts)   # Sola dön (CCW)
+                self.robot.set_control(-ts, ts)
             else:
-                self.robot.set_control(ts, -ts)   # Sağa dön (CW)
+                self.robot.set_control(ts, -ts)
             return
 
-        # Pivot dönüşü bitti veya gerekmedi
         if self._is_turning:
             self._is_turning = False
 
-        # ── Sensör bazlı PID çizgi izleme (Diferansiyel Sürüş) ──
+        # ── PID çizgi izleme ──
+        self._pid_line_follow(dt, heading_error)
+
+    # ══════════════════════════════════════════════════════════
+    # MOD 2: SENSÖR İLE KAVŞAK TESPİTİ (sensor)
+    # ══════════════════════════════════════════════════════════
+
+    def _step_sensor_mode(self, dt: float):
+        """Sensör tabanlı kavşak tespiti — dijital ikiz modu.
+
+        State machine:
+          driving      → PID çizgi izleme, sensörler kavşak arıyor
+          junction_stop → Kavşak algılandı, duruyor
+          probe_fwd    → İleri sondaj (ileride çizgi var mı? T mi 4-yol mu?)
+          probe_back   → Kavşak merkezine geri dön
+          paused       → Kavşakta düşünme süresi
+        """
+
+        if self._sensor_state == 'driving':
+            # Sensörle kavşak kontrolü
+            junc = self.robot.detect_junction()
+
+            if junc == 'junction':
+                self.robot.set_control(0, 0)
+                self._detected_cell = self.maze.world_to_cell(
+                    self.robot.center.x, self.robot.center.y)
+                self._sensor_state = 'junction_stop'
+                return
+
+            if junc == 'lost':
+                self._lost_counter += 1
+                if self._lost_counter > self.lost_line_timeout:
+                    # Çıkmaz sokak
+                    self.robot.set_control(0, 0)
+                    self._detected_cell = self.maze.world_to_cell(
+                        self.robot.center.x, self.robot.center.y)
+                    self.junction_info = 'ÇIKMAZ SOKAK'
+                    self._paused_at_cell = self._detected_cell
+                    self._pause_counter = self.junction_pause_ticks
+                    self._sensor_state = 'paused'
+                    return
+                else:
+                    self._heading_correction(dt)
+                    return
+            else:
+                self._lost_counter = 0
+
+            # Pivot dönüş kontrolü
+            target_cell = self._get_target_cell()
+            if target_cell is not None:
+                target_pos = self.maze.cell_to_world(*target_cell)
+                dx = target_pos.x - self.robot.center.x
+                dy = target_pos.y - self.robot.center.y
+                target_angle = np.arctan2(dy, dx)
+                heading_error = target_angle - self.robot.heading
+                heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
+
+                if abs(heading_error) > self.turn_in_place_threshold:
+                    self._is_turning = True
+                    ts = self.turn_speed
+                    if heading_error > 0:
+                        self.robot.set_control(-ts, ts)
+                    else:
+                        self.robot.set_control(ts, -ts)
+                    return
+
+            if self._is_turning:
+                self._is_turning = False
+
+            # PID çizgi izleme
+            self._pid_line_follow_sensor(dt)
+
+        elif self._sensor_state == 'junction_stop':
+            self.robot.set_control(0, 0)
+            self._probe_counter = 0
+            self._sensor_state = 'probe_fwd'
+
+        elif self._sensor_state == 'probe_fwd':
+            # Yavaşça ileri git
+            self.robot.set_control(self.turn_speed, self.turn_speed)
+            self._probe_counter += 1
+            if self._probe_counter >= self.probe_ticks:
+                active = self.robot.active_sensor_count
+                junc = self.robot.detect_junction()
+                if active > 0 and junc != 'junction':
+                    self._forward_open = True
+                    self.junction_info = '4-YOLLU KAVŞAK'
+                else:
+                    self._forward_open = False
+                    self.junction_info = 'T-KAVŞAK'
+                self._probe_counter = 0
+                self._sensor_state = 'probe_back'
+
+        elif self._sensor_state == 'probe_back':
+            # Yavaşça geri git
+            self.robot.set_control(-self.turn_speed, -self.turn_speed)
+            self._probe_counter += 1
+            if self._probe_counter >= self.probe_ticks:
+                self.robot.set_control(0, 0)
+                self._paused_at_cell = self._detected_cell
+                self._pause_counter = self.junction_pause_ticks
+                self._sensor_state = 'paused'
+
+        elif self._sensor_state == 'paused':
+            self.robot.set_control(0, 0)
+            if self._pause_counter > 0:
+                self._pause_counter -= 1
+                return
+            # Bekleme bitti → varışı bildir
+            self._paused_at_cell = None
+            if self.path is not None:
+                for i in range(self.current_path_index + 1, len(self.path)):
+                    if self.path[i] == self._detected_cell:
+                        self.current_path_index = i
+                        break
+                else:
+                    self.current_path_index += 1
+                if self.current_path_index >= len(self.path) - 1:
+                    self.finished = True
+            else:
+                self.dynamic_target = self._detected_cell
+                self.reached_dynamic_target = True
+            self._sensor_state = 'driving'
+
+    # ══════════════════════════════════════════════════════════
+    # ORTAK YARDIMCI METODLAR
+    # ══════════════════════════════════════════════════════════
+
+    def _get_target_cell(self):
+        """Mevcut hedef hücreyi döndür (her iki mod için ortak)."""
+        if self.path is not None:
+            if self.current_path_index + 1 < len(self.path):
+                return self.path[self.current_path_index + 1]
+            return None
+        else:
+            if self.dynamic_target and not self.reached_dynamic_target:
+                return self.dynamic_target
+            return None
+
+    def _pid_line_follow(self, dt, heading_error=0.0):
+        """PID çizgi izleme — distance modu."""
         line_error = self.robot.get_line_error()
         L = self.robot.track_width
 
         if line_error is not None:
             self._lost_counter = 0
-            # PID çıktısı artık açısal hız (omega) olarak yorumlanıyor
             omega = self.pid.compute(line_error, dt)
             speed_factor = 1.0 - 0.5 * abs(line_error)
             base = self.base_speed * speed_factor
@@ -326,7 +483,6 @@ class PathExecutor:
             if self._lost_counter > self.lost_line_timeout:
                 self.robot.set_control(0, 0)
             else:
-                # Hedefe doğru heading düzelt (küçük açı — PID yeterli)
                 omega = np.clip(heading_error * 2.0, -5.0, 5.0)
                 base = self.base_speed * 0.5
                 v_R = base + omega * L / 2
@@ -334,6 +490,44 @@ class PathExecutor:
                 v_R = np.clip(v_R, -self.robot.max_speed, self.robot.max_speed)
                 v_L = np.clip(v_L, -self.robot.max_speed, self.robot.max_speed)
                 self.robot.set_control(v_L, v_R)
+
+    def _pid_line_follow_sensor(self, dt):
+        """PID çizgi izleme — sensor modu."""
+        line_error = self.robot.get_line_error()
+        L = self.robot.track_width
+
+        if line_error is not None:
+            self._lost_counter = 0
+            omega = self.pid.compute(line_error, dt)
+            speed_factor = 1.0 - 0.5 * abs(line_error)
+            base = self.base_speed * speed_factor
+            v_R = base + omega * L / 2
+            v_L = base - omega * L / 2
+            v_R = np.clip(v_R, self.robot.min_speed, self.robot.max_speed)
+            v_L = np.clip(v_L, self.robot.min_speed, self.robot.max_speed)
+            self.robot.set_control(v_L, v_R)
+        else:
+            self._heading_correction(dt)
+
+    def _heading_correction(self, dt):
+        """Çizgi kayıpken hedefe doğru yönelme (sensor modu)."""
+        target_cell = self._get_target_cell()
+        if target_cell is None:
+            self.robot.set_control(self.base_speed * 0.3, self.base_speed * 0.3)
+            return
+        target_pos = self.maze.cell_to_world(*target_cell)
+        dx = target_pos.x - self.robot.center.x
+        dy = target_pos.y - self.robot.center.y
+        heading_error = np.arctan2(dy, dx) - self.robot.heading
+        heading_error = (heading_error + np.pi) % (2 * np.pi) - np.pi
+        L = self.robot.track_width
+        omega = np.clip(heading_error * 2.0, -5.0, 5.0)
+        base = self.base_speed * 0.5
+        v_R = base + omega * L / 2
+        v_L = base - omega * L / 2
+        v_R = np.clip(v_R, -self.robot.max_speed, self.robot.max_speed)
+        v_L = np.clip(v_L, -self.robot.max_speed, self.robot.max_speed)
+        self.robot.set_control(v_L, v_R)
 
     @property
     def progress(self):

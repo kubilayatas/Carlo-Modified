@@ -115,3 +115,30 @@ class LineFollowerRobot(DiffDriveEntity):
     def sensor_debug_str(self):
         """Debug çıktısı: - = zemin, X = çizgi"""
         return ''.join('X' if r else '-' for r in self.sensor_readings)
+
+    @property
+    def active_sensor_count(self):
+        """Aktif (çizgi üzerinde) sensör sayısı."""
+        return sum(1 for r in self.sensor_readings if r)
+
+    def detect_junction(self, threshold: int = None) -> str:
+        """Sensör pattern'ine bakarak kavşak durumunu belirle.
+
+        Args:
+            threshold: Kaç sensör aktif olunca kavşak sayılacak.
+                       None ise sensor_count - 2 kullanılır (8 sensör → 6).
+
+        Dönüş:
+            'junction' — T veya 4-yol kavşak (çoğu sensör aktif)
+            'lost'     — Çizgi tamamen kayıp (çıkmaz sokak veya sapma)
+            'line'     — Normal çizgi izleme durumu
+        """
+        if threshold is None:
+            threshold = max(self.sensor_count - 2, 3)
+        active = self.active_sensor_count
+        if active >= threshold:
+            return 'junction'
+        elif active == 0:
+            return 'lost'
+        else:
+            return 'line'
